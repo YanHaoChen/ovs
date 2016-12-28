@@ -79,6 +79,11 @@ struct stp_tcn_bpdu {
 });
 BUILD_ASSERT_DECL(sizeof(struct stp_tcn_bpdu) == 4);
 
+struct root_counter {
+    stp_identifier bridge_id;
+    int count;
+};
+
 struct stp_timer {
     bool active;                 /* Timer in use? */
     int value;                   /* Current value of timer, counting up. */
@@ -149,7 +154,13 @@ struct stp {
     void *aux;
 
     struct ovs_refcount ref_cnt;
+
+    struct root_counter stp_root_counters[20];
+    int counter_count;
 };
+
+static struct root_counter all_stp_root_counter[50];
+static int all_stp_count;
 
 static struct ovs_mutex mutex;
 static struct ovs_list all_stps__ = OVS_LIST_INITIALIZER(&all_stps__);
@@ -318,6 +329,16 @@ stp_create(const char *name, stp_identifier bridge_id,
 
     ovs_list_push_back(all_stps, &stp->node);
     ovs_mutex_unlock(&mutex);
+    int i;
+    for (i=0;i < all_stp_count;i++){
+      stp->stp_root_counters[i].bridge_id = all_stp_root_counter[i].bridge_id;
+      stp->stp_root_counters[i].count = all_stp_root_counter[i].count;
+    }
+
+    all_stp_root_counter[all_stp_count].bridge_id = stp->bridge_id;
+    all_stp_root_counter[all_stp_count].count = 0;
+    stp->counter_count = all_stp_count;
+    all_stp_count++;
     return stp;
 }
 
@@ -1203,9 +1224,32 @@ stp_root_selection(struct stp *stp) OVS_REQUIRES(mutex)
     }
     stp->root_port = root;
     if (!root) {
+        int update_count;
+        if(stp_is_root_bridge(stp)){
+          update_count=0;
+        }else{
+          update_count=1;
+        }
+        int i;
+        for(i=0; i< stp->all_stp_count ;i++) {
+          if(all_root_counter[i].bridge_id == stp->bridge_id){
+            all_root_counter[i].count += update_count;
+            break;
+          }
+        }
+
         stp->designated_root = stp->bridge_id;
         stp->root_path_cost = 0;
     } else {
+        for(i=0; i< stp->all_stp_count ;i++) {
+          if(all_root_counter[i].bridge_id == stp->designated_root){
+            all_root_counter[i].count -= 1;
+          }
+          if(all_root_counter[i].bridge_id == root->designated_root){
+            all_root_counter[i].count += 1;
+          }
+        }
+      
         stp->designated_root = root->designated_root;
         stp->root_path_cost = root->designated_cost + root->path_cost;
     }
