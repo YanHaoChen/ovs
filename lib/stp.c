@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "byte-order.h"
 #include "connectivity.h"
 #include "openvswitch/ofpbuf.h"
@@ -199,7 +200,7 @@ static bool stp_is_designated_port(const struct stp_port *)
 static void stp_config_bpdu_generation(struct stp *) OVS_REQUIRES(mutex);
 static void stp_transmit_tcn(struct stp *) OVS_REQUIRES(mutex);
 static void stp_configuration_update(struct stp *) OVS_REQUIRES(mutex);
-static bool stp_supersedes_root(const struct stp_port *root,
+static bool stp_supersedes_root(const struct stp *,const struct stp_port *root,
                                 const struct stp_port *) OVS_REQUIRES(mutex);
 static void stp_root_selection(struct stp *) OVS_REQUIRES(mutex);
 static void stp_designated_port_selection(struct stp *) OVS_REQUIRES(mutex);
@@ -330,6 +331,8 @@ stp_create(const char *name, stp_identifier bridge_id,
     ovs_list_push_back(all_stps, &stp->node);
     ovs_mutex_unlock(&mutex);
     int i;
+
+
     for (i=0;i < all_stp_count;i++){
       stp->stp_root_counters[i].bridge_id = all_stp_root_counter[i].bridge_id;
       stp->stp_root_counters[i].count = all_stp_root_counter[i].count;
@@ -339,6 +342,9 @@ stp_create(const char *name, stp_identifier bridge_id,
     all_stp_root_counter[all_stp_count].count = 0;
     stp->counter_count = all_stp_count;
     all_stp_count++;
+
+
+
     return stp;
 }
 
@@ -1187,14 +1193,24 @@ stp_configuration_update(struct stp *stp) OVS_REQUIRES(mutex)
 }
 
 static bool
-stp_supersedes_root(const struct stp_port *root, const struct stp_port *p)
+stp_supersedes_root(const struct stp *stp, const struct stp_port *root, const struct stp_port *p)
     OVS_REQUIRES(mutex)
 {
     int p_cost = p->designated_cost + p->path_cost;
     int root_cost = root->designated_cost + root->path_cost;
 
+    int i;
+    stp_identifier update_id;
+    update_id = p->designated_root;
+    for(i=0; i< stp->counter_count ;i++) {
+      if(stp->stp_root_counters[i].bridge_id == p->designated_root){
+        update_id |= (uint64_t) stp->stp_root_counters[i].count << 48;
+        break;
+      }
+    }
+
     if (p->designated_root != root->designated_root) {
-        return p->designated_root < root->designated_root;
+        return update_id < root->designated_root;
     } else if (p_cost != root_cost) {
         return p_cost < root_cost;
     } else if (p->designated_bridge != root->designated_bridge) {
@@ -1217,7 +1233,7 @@ stp_root_selection(struct stp *stp) OVS_REQUIRES(mutex)
             || p->designated_root >= stp->bridge_id) {
             continue;
         }
-        if (root && !stp_supersedes_root(root, p)) {
+        if (root && !stp_supersedes_root(stp, root, p)) {
             continue;
         }
         root = p;
@@ -1231,9 +1247,9 @@ stp_root_selection(struct stp *stp) OVS_REQUIRES(mutex)
           update_count=1;
         }
         int i;
-        for(i=0; i< stp->all_stp_count ;i++) {
-          if(all_root_counter[i].bridge_id == stp->bridge_id){
-            all_root_counter[i].count += update_count;
+        for(i=0; i< all_stp_count ;i++) {
+          if(all_stp_root_counter[i].bridge_id == stp->bridge_id){
+            all_stp_root_counter[i].count += update_count;
             break;
           }
         }
@@ -1241,18 +1257,37 @@ stp_root_selection(struct stp *stp) OVS_REQUIRES(mutex)
         stp->designated_root = stp->bridge_id;
         stp->root_path_cost = 0;
     } else {
-        for(i=0; i< stp->all_stp_count ;i++) {
-          if(all_root_counter[i].bridge_id == stp->designated_root){
-            all_root_counter[i].count -= 1;
+        int i;
+        for(i=0; i< all_stp_count ;i++) {
+          if(all_stp_root_counter[i].bridge_id == stp->designated_root){
+            all_stp_root_counter[i].count -= 1;
           }
-          if(all_root_counter[i].bridge_id == root->designated_root){
-            all_root_counter[i].count += 1;
+          if(all_stp_root_counter[i].bridge_id == root->designated_root){
+            all_stp_root_counter[i].count += 1;
           }
         }
-      
+
         stp->designated_root = root->designated_root;
         stp->root_path_cost = root->designated_cost + root->path_cost;
+
     }
+
+    FILE *fp;
+    fp = fopen("/tmp/ovstest","w");
+
+    int i;
+    for(i=0; i< all_stp_count ;i++) {
+      fprintf(fp, "%" PRId64 ",%d\n",all_stp_root_counter[i].bridge_id,all_stp_root_counter[i].count);
+    }
+    fclose(fp);
+    char str[70];
+    sprintf(str,"ovs:%" PRId64 "",stp->bridge_id);
+    fp = fopen(str,"w");
+    for(i=0; i< stp->counter_count ;i++) {
+        fprintf(fp, "%" PRId64 ",%d\n",stp->stp_root_counters[i].bridge_id,stp->stp_root_counters[i].count);
+    }
+    fclose(fp);
+
 }
 
 static void
